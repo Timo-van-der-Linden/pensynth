@@ -9,7 +9,6 @@ Refactored : 30/07/2021
 
 @author: jeremylhour
 """
-import warnings
 import numpy as np
 import itertools
 import time
@@ -23,8 +22,7 @@ from scipy.spatial import Delaunay
 # ------------------------------------------------------------------------------
 # UTILS
 # ------------------------------------------------------------------------------
-@njit
-def get_ranks(node, nodes):
+def get_ranks(node: np.array, nodes: np.array) -> np.array:
     """
     get_ranks:
         returns the ranks and anti-ranks of nodes by rank in closeness to node
@@ -32,28 +30,31 @@ def get_ranks(node, nodes):
     @param node (np.array): point for which we want to find the neighbors
     @param nodes (np.array): points that are candidate neighbors
     """
-    distance = cdist(node, nodes, "sqeuclidean")
+    distance = cdist(node.reshape(1, -1), nodes, "sqeuclidean")[0]
     anti_ranks = np.argsort(distance)
     ranks = np.argsort(anti_ranks)
     return ranks, anti_ranks
 
 
-def in_hull(x, points):
+def in_hull(x: np.array, points: np.array) -> bool:
     """
+    This function is based on Stack Overflow:
+    https://stackoverflow.com/questions/16750618/whats-an-efficient-way-to-find-if-a-point-lies-in-the-convex-hull-of-a-point-cl # noqa
+    
     in_hull:
         test if points in x are in hull
 
-    @param x (np.array):  should be a n x p coordinates of n points in p dimensions
-    @param points (np.array): the m x p array of the coordinates of m points in p dimensions
+    @param x (np.array): should be a 1 x p coordinates of 1 point in p
+    dimensions
+    @param points (np.array): the m x p array of the coordinates of m points
+    in p dimensions
     """
-    n_points = len(points)
-    c = np.zeros(n_points)
-    A = np.r_[points.T, np.ones((1, n_points))]
-    b = np.r_[x, np.ones(1)]
-    with warnings.catch_warnings():  # to ignore warning when degenerate cases
-        warnings.simplefilter("ignore")
-        lp = linprog(c, A_eq=A, b_eq=b)
-    return lp.success
+    rows = points.shape[0]
+    A = np.hstack([points, np.ones((rows, 1))]).T
+    b = np.append(x, 1)
+    c = np.zeros(rows)
+    result = linprog(c, A_eq=A, b_eq=b)
+    return result.success
 
 
 def compute_radius_and_barycenter(nodes, fix_overflow=True):
