@@ -10,14 +10,133 @@ Created on Sun Nov  1 10:51:38 2020
 import numpy as np
 import pandas as pd
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from tqdm import tqdm
-from typing import Tuple, List
+from typing import Tuple, List, Optional
+from pathlib import Path
+from box import Box
 from pensynth.pensynthpy import (
     in_hull,
     incremental_pure_synth,
     pensynth_weights
 )
+
+
+@dataclass
+class LalondeData():
+    path: Path
+    x0: Optional[pd.DataFrame] = None
+    x1: Optional[pd.DataFrame] = None
+    y0: Optional[pd.DataFrame] = None
+    y1: Optional[pd.DataFrame] = None
+    x0_unscaled: Optional[pd.DataFrame] = None
+    scaling: Optional[pd.Series] = None
+    data: Optional[pd.DataFrame] = None
+
+    def __post_init__(self):
+        self.read_raw_data()
+        self.determine_scaling()
+        self.combine_data()
+
+    def read_raw_data(self) -> None:
+        """
+        Loading Lalonde's dataset rescaled as in the paper and unscaled for
+        statistics.
+        """
+        names = dict(
+            x0="X0",
+            x1="X1",
+            y0="Y0",
+            y1="Y1",
+            x0_unscaled="X0_unscaled"
+        )
+        for name, file in names.items():
+            data = pd.read_csv(self.path / (file + ".txt"), sep=" ")
+            self.__setattr__(name, data)
+
+    def determine_scaling(self) -> None:
+        scaling = (self.x0_unscaled / self.x0).mean() ** -1
+        scaling["treatment"] = 1
+        scaling["outcome"] = 1
+        self.scaling = scaling
+
+    def _average_duplicates(
+        self,
+        data: pd.DataFrame,
+        columns_to_average: List[str]
+    ) -> pd.DataFrame:
+        may_be_duplicate = list(data.columns.difference(columns_to_average))
+        unique_index = data[~data[may_be_duplicate].duplicated()].index
+        result = data.groupby(may_be_duplicate)[data.columns].mean()
+        result.index = unique_index
+        return result
+
+    def _get_treated(self) -> pd.DataFrame:
+        result = pd.concat([self.x1, self.y1], axis=1)
+        result["treatment"] = 1
+        result.rename(columns={"x": "outcome"}, inplace=True)
+        return result
+
+    def _get_untreated(self) -> pd.DataFrame:
+        result = pd.concat([self.x0, self.y0], axis=1)
+        result["treatment"] = 0
+        result.rename(columns={"x": "outcome"}, inplace=True)
+        return result
+
+    def combine_data(self) -> None:
+        treated = self._get_treated()
+        untreated = self._get_untreated()
+        untreated.index = untreated.index + treated.shape[0]
+        untreated = self._average_duplicates(untreated, ["outcome"])
+        result = pd.concat([treated, untreated]) / self.scaling
+        self.data = result[self.scaling.index]
+        
+
+
+@dataclass
+class MyData():
+    data: pd.DataFrame
+    outcome_var: str
+    treatment_var: str
+    scaling: Optional[pd.Series]
+
+    @property
+    def scaled(self) -> pd.DataFrame:
+        if self.scaling is None:
+            scaled = (self.data - self.data.mean()) / self.data.std()
+        else:
+            scaled = self.data * self.scaling
+        return scaled
+
+    @property
+    def outcome(self) -> pd.Series:
+        return self.data[self.outcome_var]
+
+    @property
+    def treatment(self) -> pd.Series:
+        return self.data[self.treatment_var]
+
+    @property
+    def x_names(self) -> list:
+        to_drop = [self.outcome_var, self.treatment_var]
+        return self.data.drop(columns=to_drop).columns.to_list()
+
+    @property
+    def x_control(self) -> pd.DataFrame:
+        return self.scaled.loc[self.treatment == 0, self.x_names].values
+
+    @property
+    def x_treatment(self) -> pd.DataFrame:
+        return self.scaled.loc[self.treatment == 1, self.x_names].values
+
+    @property
+    def y_control(self) -> pd.Series:
+        return self.outcome[self.treatment == 0].values
+
+    @property
+    def y_treatment(self) -> pd.Series:
+        return self.outcome[self.treatment == 1].values
 
 
 def print_between_bars(string: str) -> None:
@@ -33,78 +152,60 @@ def print_preamble() -> None:
     print(msg)
 
 
-def read_data(data_path: str) -> Tuple[np.ndarray]:
+def construct_dataframe(data: Box) -> pd.DataFrame:
     """
-    Loading Lalonde's dataset rescaled as in the paper and unscaled for
-    statistics.
+    Consolidate duplicates in x_untreated
     """
-    x1_full = np.loadtxt(data_path + "x1.txt", skiprows=1)
-    y1_full = np.loadtxt(data_path + "y1.txt", skiprows=1)
-    x0_full = np.loadtxt(data_path + "x0.txt", skiprows=1)
-    y0_full = np.loadtxt(data_path + "y0.txt", skiprows=1)
-    x0_unscaled_full = np.loadtxt(data_path + "x0_unscaled.txt", skiprows=1)
-    return x1_full, y1_full, x0_full, y0_full, x0_unscaled_full
-
-
-def construct_dataframe(
-    x0_full: np.ndarray,
-    y0_full: np.ndarray,
-    x0_unscaled_full: np.ndarray,
-    x_names: List[str]
-) -> pd.DataFrame:
-    """
-    Consolidate duplicates in x0
-    """
-    df = pd.DataFrame(x0_full)
-    df.columns = [item + "_rescaled" for item in x_names]
-    df["outcome"] = y0_full
-    for i in range(x0_unscaled_full.shape[1]):
-        df[x_names[i]] = x0_unscaled_full[:, i]
+    x_names = data.x_untreated_full.columns.to_list()
+    df = data.x_untreated_full.copy()
+    df.columns = [i + "_rescaled" for i in data.x_untreated_full.columns]
+    df["outcome"] = data.y_untreated_full
+    for i in range(data.x_untreated_unscaled_full.shape[1]):
+        df[x_names[i]] = data.x_untreated_unscaled_full.iloc[:, i]
     return df
 
 
-def remove_duplicates(
-    df: pd.DataFrame,
-    x_names: List[str]
-) -> Tuple[np.ndarray]:
+def remove_duplicates(data: Box) -> Tuple[np.ndarray]:
     """
     Consolidate dataset for untreated
     """
-    df_consolidated = df.groupby(x_names, as_index=False).mean()
-    x0 = df_consolidated[[i + "_rescaled" for i in x_names]].to_numpy()
-    x0_unscaled = df_consolidated[x_names].to_numpy()
-    y0 = df_consolidated["outcome"].to_numpy()
-    return x0, x0_unscaled, y0
+    x_names = data.x_untreated_full.columns.to_list()
+    df_consolidated = data.df.groupby(x_names, as_index=False).mean()
+    x_untreated = df_consolidated[[i + "_rescaled" for i in x_names]]
+    x_untreated_unscaled = df_consolidated[x_names]
+    y_untreated = df_consolidated["outcome"]
+    return x_untreated, x_untreated_unscaled, y_untreated
 
 
 def compute_statistics(
-    all_w: np.ndarray,
-    x0_unscaled: np.ndarray,
-    y0: np.ndarray,
-    y1_full: np.ndarray
+    weights: np.ndarray,
+    x_untreated_unscaled: np.ndarray,
+    y_untreated: np.ndarray,
+    y_treated_full: np.ndarray,
+    x_names
 ) -> Tuple[np.ndarray]:
     """
     COMPUTE THE NECESSARY STATISTICS
     """
-    y0_hat = all_w @ y0
-    balance_check = (all_w @ x0_unscaled).mean(axis=0)
+    y_synthetic_control = weights @ y_untreated
+    balance_check = (weights @ x_untreated_unscaled).mean(axis=0)
 
-    print("ATT: {:.3f}".format((y1_full - y0_hat).mean(axis=0)))
+    print("ATT: {:.3f}".format((y_treated_full - y_synthetic_control).mean(axis=0)))
 
     for b, value in enumerate(balance_check):
         print(x_names[b] + ": {:.3f}".format(value))
 
-    sparsity_index = (all_w > 0).sum(axis=1)
+    sparsity_index = (weights > 0).sum(axis=1)
     print("Min sparsity: {:.0f}".format(sparsity_index.min()))
     print("Median sparsity: {:.0f}".format(np.median(sparsity_index)))
     print("Max sparsity: {:.0f}".format(sparsity_index.max()))
 
-    activ_index = (all_w > 0).sum(axis=0) > 0
+    activ_index = (weights > 0).sum(axis=0) > 0
     print("Active untreated units: {:.0f}".format(activ_index.sum()))
-    return y0_hat, balance_check, sparsity_index
+    return y_synthetic_control, balance_check, sparsity_index
 
 
-def run_optimizer(x0, x1_full) -> np.ndarray:
+def run_optimizer(x_untreated, x_treated_full) -> np.ndarray:
     """
     We proceed in 3 steps:
     - if some untreated are the same as the treated, assign uniform weights to
@@ -114,41 +215,44 @@ def run_optimizer(x0, x1_full) -> np.ndarray:
     - if the treated is not inside the convex hull defined by the untreated,
       run the standard synthetic control.
     """
-    all_w = np.zeros((len(x1_full), len(x0)))
+    weights = np.zeros((len(x_treated_full), len(x_untreated)))
     start_time = time.time()
-    with tqdm(total=(len(x1_full))) as prog:
-        for i, x in enumerate(x1_full):
+    with tqdm(total=(len(x_treated_full))) as prog:
+        for i, x in enumerate(x_treated_full):
             # True if untreated is same as treated
-            sameAsUntreated = np.all(x0 == x, axis=1)
+            sameAsUntreated = np.all(x_untreated == x, axis=1)
             if any(sameAsUntreated):
                 untreatedId = np.where(sameAsUntreated)
-                all_w[i, untreatedId] = 1 / len(untreatedId)
+                weights[i, untreatedId] = 1 / len(untreatedId)
             else:
-                inHullFlag = in_hull(x=x, points=x0)
+                inHullFlag = in_hull(x=x, points=x_untreated)
                 if inHullFlag:
-                    x0_tilde, antiranks = incremental_pure_synth(
+                    x_untreated_tilde, antiranks = incremental_pure_synth(
                         X1=x,
-                        X0=x0
+                        X0=x_untreated
                     )
-                    all_w[i, antiranks] = pensynth_weights(
-                        X0=x0_tilde,
+                    weights[i, antiranks] = pensynth_weights(
+                        X0=x_untreated_tilde,
                         X1=x,
                         pen=0
                     )
                 else:
-                    all_w[i, ] = pensynth_weights(X0=x0, X1=x, pen=1e-6)
+                    weights[i, ] = pensynth_weights(
+                        X0=x_untreated,
+                        X1=x, pen=1e-6
+                    )
             prog.update(1)
     time_elapsed = time.time() - start_time
     print(f"Time elapsed : {time_elapsed:.2f} seconds ---")
-    return all_w
+    return weights
 
 
-def save_weights_as_parquet(all_w: np.ndarray, x0: np.ndarray) -> None:
+def save_weights_as_parquet(weights: np.ndarray, x_untreated: np.ndarray) -> None:
     """
     SAVING WEIGHTS AS PARQUET FILE
     """
-    df = pd.DataFrame(all_w)
-    df.columns = ["Unit_" + str(i + 1) for i in range(len(x0))]
+    df = pd.DataFrame(weights)
+    df.columns = ["Unit_" + str(i + 1) for i in range(len(x_untreated))]
     df.to_parquet("Lalonde_solution.parquet", engine="pyarrow")
 
 
@@ -163,17 +267,18 @@ def statistics_sanity_check(sparsity_index: np.ndarray) -> np.ndarray:
 
 
 def write_statistics_to_file(
-    y1_full: np.ndarray,
-    y0_hat: np.ndarray,
+    y_treated_full: np.ndarray,
+    y_synthetic_control: np.ndarray,
     balance_check: np.ndarray,
     sparsity_index: np.ndarray,
-    high_sparsity: np.ndarray
+    high_sparsity: np.ndarray,
+    x_names: List
 ) -> None:
     """
     DUMPING STATS TO FILE
     """
     with open("statistics.txt", "w") as f:
-        f.write("ATT: {:.3f}\n".format((y1_full - y0_hat).mean(axis=0)))
+        f.write("ATT: {:.3f}\n".format((y_treated_full - y_synthetic_control).mean(axis=0)))
         for b, value in enumerate(balance_check):
             f.write(x_names[b] + ": {:.3f}\n".format(value))
         f.write("Min sparsity: {:.0f}\n".format(sparsity_index.min()))
@@ -184,36 +289,31 @@ def write_statistics_to_file(
 
 if __name__ == "__main__":
     print_between_bars("DATA MANAGEMENT")
-    x_names = [
-        "age",
-        "education",
-        "married",
-        "black",
-        "hispanic",
-        "re74",
-        "re75",
-        "nodegree",
-        "NoIncome74",
-        "NoIncome75"
-    ]
-    x1_full, y1_full, x0_full, y0_full, x0_unscaled_full = read_data("data/")
-    df = construct_dataframe(x0_full, y0_full, x0_unscaled_full, x_names)
-    x0, x0_unscaled, y0 = remove_duplicates(df, x_names)
+    lalonde = LalondeData(Path("./data"))
+    data = MyData(
+        data=lalonde.data,
+        outcome_var="outcome",
+        treatment_var="treatment",
+        scaling=lalonde.scaling
+    )
     print_between_bars("COMPUTING PURE SYNTHETIC CONTROL FOR EACH TREATED")
-    all_w = run_optimizer(x0, x1_full)
+    weights = run_optimizer(data.x_control, data.x_treatment)
+    # weights = pd.read_csv(path / "weights.csv").values
     print_between_bars("COMPUTING STATISTICS AND SAVING RESULTS")
     y0_hat, balance_check, sparsity_index = compute_statistics(
-        all_w,
-        x0_unscaled,
-        y0,
-        y1_full
+        weights,
+        data.data.loc[data.treatment == 0, data.x_names],
+        data.y_control,
+        data.y_treatment,
+        data.x_names
     )
-    save_weights_as_parquet(all_w, x0)
+    save_weights_as_parquet(weights, data.x_control)
     high_sparsity = statistics_sanity_check(sparsity_index)
     write_statistics_to_file(
-        y1_full,
+        data.y_treatment,
         y0_hat,
         balance_check,
         sparsity_index,
-        high_sparsity
+        high_sparsity,
+        data.x_names
     )
