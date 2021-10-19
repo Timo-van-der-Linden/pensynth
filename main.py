@@ -152,31 +152,6 @@ def print_preamble() -> None:
     print(msg)
 
 
-def construct_dataframe(data: Box) -> pd.DataFrame:
-    """
-    Consolidate duplicates in x_untreated
-    """
-    x_names = data.x_untreated_full.columns.to_list()
-    df = data.x_untreated_full.copy()
-    df.columns = [i + "_rescaled" for i in data.x_untreated_full.columns]
-    df["outcome"] = data.y_untreated_full
-    for i in range(data.x_untreated_unscaled_full.shape[1]):
-        df[x_names[i]] = data.x_untreated_unscaled_full.iloc[:, i]
-    return df
-
-
-def remove_duplicates(data: Box) -> Tuple[np.ndarray]:
-    """
-    Consolidate dataset for untreated
-    """
-    x_names = data.x_untreated_full.columns.to_list()
-    df_consolidated = data.df.groupby(x_names, as_index=False).mean()
-    x_untreated = df_consolidated[[i + "_rescaled" for i in x_names]]
-    x_untreated_unscaled = df_consolidated[x_names]
-    y_untreated = df_consolidated["outcome"]
-    return x_untreated, x_untreated_unscaled, y_untreated
-
-
 def compute_statistics(
     weights: np.ndarray,
     x_untreated_unscaled: np.ndarray,

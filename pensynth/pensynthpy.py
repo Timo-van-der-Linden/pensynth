@@ -24,21 +24,6 @@ from scipy.spatial import Delaunay
 # UTILS
 # ------------------------------------------------------------------------------
 @njit
-def closest_points(node, nodes, k=1):
-    """
-    closest_points:
-        find the k nearest neighbors
-
-    @param node (np.array): point for which we want to find the neighbors
-    @param nodes (np.array): points that are candidate neighbors
-    @param k (int): how many neighbors to return?
-    """
-    dist_2 = np.diag((nodes - node) @ np.transpose(nodes - node))
-    ranks = [sorted(dist_2).index(x) for x in dist_2]
-    return nodes[[r <= k-1 for r in ranks]]
-
-
-@njit
 def get_ranks(node, nodes):
     """
     get_ranks:
@@ -47,9 +32,10 @@ def get_ranks(node, nodes):
     @param node (np.array): point for which we want to find the neighbors
     @param nodes (np.array): points that are candidate neighbors
     """
-    dist_2 = np.diag((nodes - node) @ np.transpose(nodes - node))
-    ranks = np.array([sorted(dist_2).index(x) for x in dist_2])
-    return ranks, np.argsort(ranks)
+    distance = cdist(node, nodes, "sqeuclidean")
+    anti_ranks = np.argsort(distance)
+    ranks = np.argsort(anti_ranks)
+    return ranks, anti_ranks
 
 
 def in_hull(x, points):
@@ -139,7 +125,7 @@ def incremental_pure_synth(X1, X0):
 
     """
     # get the ranks and anti-ranks of X0 with respect to their distances to X1
-    ranks, antiRanks = get_ranks(X1, X0)
+    ranks, anti_ranks = get_ranks(X1, X0)
     n0, p = X0.shape
 
     # Initialize variables
@@ -153,7 +139,7 @@ def incremental_pure_synth(X1, X0):
         the_simplex = tuple(range(k))
 
         # 1. Set of 'k' nearest neighbors
-        X_NN = X0[antiRanks[:k], ]
+        X_NN = X0[anti_ranks[:k], ]
 
         # 2. Check if X1 belongs to that convex hull
         if not inHullFlag:
@@ -179,15 +165,15 @@ def incremental_pure_synth(X1, X0):
                     foundIt = True
                     break
 
-                if not inside_sphere(np.delete(X0, antiRanks[candidate, ], 0), center, radius):
+                if not inside_sphere(np.delete(X0, anti_ranks[candidate, ], 0), center, radius):
                     the_simplex = candidate
                     foundIt = True
                     break
         if foundIt:
             break
 
-    antiRanks_tilde = sorted(antiRanks[the_simplex, ])
-    return X0[antiRanks_tilde, ], antiRanks_tilde
+    anti_ranks_tilde = sorted(anti_ranks[the_simplex, ])
+    return X0[anti_ranks_tilde, ], anti_ranks_tilde
 
 
 def pensynth_weights(X0, X1, pen=0.0, V=None):
