@@ -12,6 +12,7 @@ Refactored : 30/07/2021
 import numpy as np
 import itertools
 import time
+from typing import Tuple
 from numba import njit
 from scipy.spatial.distance import cdist
 from scipy.optimize import linprog
@@ -22,7 +23,7 @@ from scipy.spatial import Delaunay
 # ------------------------------------------------------------------------------
 # UTILS
 # ------------------------------------------------------------------------------
-def get_ranks(node: np.array, nodes: np.array) -> np.array:
+def get_ranks(node: np.array, nodes: np.array) -> Tuple[np.ndarray]:
     """
     get_ranks:
         returns the ranks and anti-ranks of nodes by rank in closeness to node
@@ -38,9 +39,6 @@ def get_ranks(node: np.array, nodes: np.array) -> np.array:
 
 def in_hull(x: np.array, points: np.array) -> bool:
     """
-    This function is based on Stack Overflow:
-    https://stackoverflow.com/questions/16750618/whats-an-efficient-way-to-find-if-a-point-lies-in-the-convex-hull-of-a-point-cl # noqa
-    
     in_hull:
         test if points in x are in hull
 
@@ -48,44 +46,40 @@ def in_hull(x: np.array, points: np.array) -> bool:
     dimensions
     @param points (np.array): the m x p array of the coordinates of m points
     in p dimensions
+    
+    This function is based on Stack Exchange:
+    https://stackoverflow.com/questions/16750618/whats-an-efficient-way-to-find-if-a-point-lies-in-the-convex-hull-of-a-point-cl # noqa
     """
-    rows = points.shape[0]
-    A = np.hstack([points, np.ones((rows, 1))]).T
+    size = points.shape[0]
+    A = np.hstack([points, np.ones((size, 1))]).T
     b = np.append(x, 1)
-    c = np.zeros(rows)
+    c = np.zeros(size)
     result = linprog(c, A_eq=A, b_eq=b)
     return result.success
 
 
-def compute_radius_and_barycenter(nodes, fix_overflow=True):
+def compute_radius_and_barycenter(nodes: np.ndarray) -> Tuple[np.ndarray]:
     """
     compute_radius_and_barycenter:
         returns radius, coordinates of barycenter
         for circumscribed hypersphere for these points
 
-    @param nodes (np.array): array of dimension (p+1) x p of the p+1 points in p dimension
-    @param fix_overflow (bool): if True brutally fixes the overflow
+    @param nodes (np.array): array of dimension (p+1) x p of the p+1 points in
+    p dimension
 
-    Source:
-        https://math.stackexchange.com/questions/1087011/calculating-the-radius-of-the-circumscribed-sphere-of-an-arbitrary-tetrahedron
-
-    Note : normally, it should return np.sqrt(-a[0]/2), a[1:] @ nodes, but overflow can occur so I force a positive value inside sqrt
+    This function is based on Stack Exchange:
+    https://math.stackexchange.com/questions/1087011/calculating-the-radius-of-the-circumscribed-sphere-of-an-arbitrary-tetrahedron # noqa
     """
-    p = nodes.shape[1]
-
-    Delta = np.zeros((p+2, p+2))
-    Delta[0, ] = np.concatenate(([0], np.ones(p+1)), axis=0)
-    Delta[:, 0] = np.concatenate(([0], np.ones(p+1)), axis=0)
-    Delta[1:, 1:] = cdist(nodes, nodes)**2
-
-    a = np.linalg.inv(Delta)[:, 0]
-    if fix_overflow:
-        return np.sqrt(np.abs(a[0])/2), a[1:] @ nodes
-    else:
-        return np.sqrt(-a[0]/2), a[1:] @ nodes
+    size = nodes.shape[1] + 2
+    delta = np.ones((size, size))
+    delta[0, 0] = 0
+    delta[1:, 1:] = cdist(nodes, nodes, "sqeuclidean")
+    inverse = np.linalg.inv(delta)
+    radius = np.sqrt(np.abs(inverse[0, 0] / 2))
+    barycenter = inverse[1:, 0] @ nodes
+    return radius, barycenter
 
 
-@njit
 def inside_sphere(nodes, barycenter, radius):
     """
     inside_ball:
@@ -99,7 +93,6 @@ def inside_sphere(nodes, barycenter, radius):
     return np.any(np.array([item < radius**2 for item in dist_2]))
 
 
-@njit
 def Tzero(w, tol=1e-5):
     """
     Tzero:
@@ -134,7 +127,7 @@ def incremental_pure_synth(X1, X0):
 
     # BIG LOOP #
     # We loop over number of possible points, starting from p+1
-    for k in range(p+1, n0+1):
+    for k in range(p + 1, n0 + 1):
         # init the_simplex variable if there is a problem
         # when points is not inside convex hull, returns all the points
         the_simplex = tuple(range(k))
@@ -143,7 +136,7 @@ def incremental_pure_synth(X1, X0):
         X_NN = X0[anti_ranks[:k], ]
 
         # 2. Check if X1 belongs to that convex hull
-        if not inHullFlag:
+        if not inHullFlag:  # this if clause should be removed
             inHullFlag = in_hull(X1, X_NN)
 
         if not inHullFlag:
