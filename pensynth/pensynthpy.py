@@ -18,15 +18,78 @@ from scipy.spatial.distance import cdist
 from scipy.optimize import linprog
 from cvxopt import matrix, solvers
 from scipy.spatial import Delaunay
+from dataclasses import dataclass
 
 
-# ------------------------------------------------------------------------------
-# UTILS
-# ------------------------------------------------------------------------------
-def get_ranks(node: np.array, nodes: np.array) -> Tuple[np.ndarray]:
+@dataclass
+class Hypersphere():
+    nodes: np.ndarray
+
+    @property
+    def nodes(self) -> np.ndarray:
+        return self._nodes
+
+    @nodes.setter
+    def nodes(self, value: np.ndarray):
+        msg = r"nodes must be a matrix of (p+1) x p"
+        nodes = np.array(value, dtype=float)
+        if nodes.ndim != 2:
+            raise ValueError(msg)
+        rows, columns = nodes.shape
+        if (rows - 1) != columns:
+            raise ValueError(msg)
+        self._nodes = nodes
+
+    @property
+    def rows(self) -> int:
+        return self.nodes.shape[0]
+
+    @property
+    def columns(self) -> int:
+        return self.nodes.shape[1]
+
+    @property
+    def distance(self) -> np.ndarray:
+        return cdist(self.nodes, self.nodes, "sqeuclidean")
+
+    @property
+    def inv_cm_determinant(self) -> np.ndarray:
+        """
+        The inverse of the Cayley-Menger Determinant. This function is based
+        on Stack Exchange:
+        https://math.stackexchange.com/questions/1087011/calculating-the-radius-of-the-circumscribed-sphere-of-an-arbitrary-tetrahedron # noqa
+        """
+        size = self.columns + 2
+        determinant = np.ones((size, size))
+        determinant[0, 0] = 0
+        determinant[1:, 1:] = self.distance
+        inverse = np.linalg.inv(determinant)
+        return inverse
+    
+    @property
+    def radius(self) -> float:
+        return np.sqrt(np.abs(self.inv_cm_determinant[0, 0] / 2))
+    
+    @property
+    def barycenter(self) -> np.ndarray:
+        return self.inv_cm_determinant[1:, 0] @ self.nodes
+    
+    def contains(self, nodes: np.ndarray) -> bool:
+        """
+        Find if any of the nodes is inside the given sphere.
+    
+        @param nodes (np.array): points to check if inside
+        """
+        if nodes.shape[1] != self.columns:
+            raise ValueError(f"nodes must be matrix of n x {self.columns}")
+        difference = nodes - self.barycenter
+        distance = (difference ** 2).sum(axis=1)
+        return np.any(distance < (self.radius ** 2))
+
+
+def get_ranks(node: np.ndarray, nodes: np.ndarray) -> Tuple[np.ndarray]:
     """
-    get_ranks:
-        returns the ranks and anti-ranks of nodes by rank in closeness to node
+    Returns the ranks and anti-ranks of nodes by rank in closeness to node.
 
     @param node (np.array): point for which we want to find the neighbors
     @param nodes (np.array): points that are candidate neighbors
@@ -37,10 +100,9 @@ def get_ranks(node: np.array, nodes: np.array) -> Tuple[np.ndarray]:
     return ranks, anti_ranks
 
 
-def in_hull(x: np.array, points: np.array) -> bool:
+def in_hull(x: np.ndarray, points: np.ndarray) -> bool:
     """
-    in_hull:
-        test if points in x are in hull
+    Tests if x is in hull formed by points.
 
     @param x (np.array): should be a 1 x p coordinates of 1 point in p
     dimensions
@@ -58,116 +120,54 @@ def in_hull(x: np.array, points: np.array) -> bool:
     return result.success
 
 
-def compute_radius_and_barycenter(nodes: np.ndarray) -> Tuple[np.ndarray]:
+def set_zero_weights(weights: np.ndarray, tolerance: int=1e-5) -> np.ndarray:
     """
-    compute_radius_and_barycenter:
-        returns radius, coordinates of barycenter
-        for circumscribed hypersphere for these points
-
-    @param nodes (np.array): array of dimension (p+1) x p of the p+1 points in
-    p dimension
-
-    This function is based on Stack Exchange:
-    https://math.stackexchange.com/questions/1087011/calculating-the-radius-of-the-circumscribed-sphere-of-an-arbitrary-tetrahedron # noqa
-    """
-    size = nodes.shape[1] + 2
-    delta = np.ones((size, size))
-    delta[0, 0] = 0
-    delta[1:, 1:] = cdist(nodes, nodes, "sqeuclidean")
-    inverse = np.linalg.inv(delta)
-    radius = np.sqrt(np.abs(inverse[0, 0] / 2))
-    barycenter = inverse[1:, 0] @ nodes
-    return radius, barycenter
-
-
-def inside_sphere(nodes, barycenter, radius):
-    """
-    inside_ball:
-        find if any of the nodes is inside the given sphere
-
-    @param nodes (np.array): points to check if inside
-    @param barycenter (np.array): coordinates of the barycenter
-    @param radius (float): radius
-    """
-    dist_2 = np.diag((nodes - barycenter) @ np.transpose(nodes - barycenter))
-    return np.any(np.array([item < radius**2 for item in dist_2]))
-
-
-def Tzero(w, tol=1e-5):
-    """
-    Tzero:
-        set values under threshold to zero.
+    Set weights within the tolerance to zero and ensure the weights sum to one.
 
     @param w (np.array): numpy array of dimension 1, such that sum(w) = 1.
     @param tol (float): tolerance
     """
-    w[w < tol] = 0
-    return w/np.sum(w)
+    matrix[matrix <= tolerance] = 0
+    return matrix / np.sum(matrix)
 
 
-# ------------------------------------------------------------------------------
-# MAIN FUNCTIONS
-# ------------------------------------------------------------------------------
 def incremental_pure_synth(X1, X0):
     """
-    incremental_pure_synth:
-        main algorithm, find the vertices of the simplex that X1 falls into
-        returns the points and the antiranks
+    Main algorithm. Find the vertices of the simplex that X1 falls into returns
+    the points and the antiranks.
 
     @param X1 (np.array): array of dimension p of the treated unit
     @param X0 (np.array): n x p array of untreated units
 
     """
-    # get the ranks and anti-ranks of X0 with respect to their distances to X1
+    # we don't even use the ranks
     ranks, anti_ranks = get_ranks(X1, X0)
     n0, p = X0.shape
+    simplex = None
 
-    # Initialize variables
-    foundIt, inHullFlag = False, False
-
-    # BIG LOOP #
-    # We loop over number of possible points, starting from p+1
     for k in range(p + 1, n0 + 1):
-        # init the_simplex variable if there is a problem
-        # when points is not inside convex hull, returns all the points
-        the_simplex = tuple(range(k))
-
-        # 1. Set of 'k' nearest neighbors
-        X_NN = X0[anti_ranks[:k], ]
-
-        # 2. Check if X1 belongs to that convex hull
-        if not inHullFlag:  # this if clause should be removed
-            inHullFlag = in_hull(X1, X_NN)
-
-        if not inHullFlag:
-            continue  # skip to next iteration if X1 not in convex hull of nearest neighbors
-
-        # 3. For all the subsets of cardinality p+1 that have x in their convex hull...
-        #  (since previous simplices did not contain X1,
-        #   we need only to consider the simplices that have the new nearest neighbors as a vertex)
-        # ...check if a point in X0 is contained in the circumscribing hypersphere of any of these simplices
-        for item in itertools.combinations(range(k-1), p):
-            candidate = item + (k-1,)
-            if in_hull(X1, X_NN[candidate, ]):
-                try:
-                    radius, center = compute_radius_and_barycenter(X_NN[candidate, ])  # sometimes gives an error if points have the same values for a particular X0
-                except:
-                    radius = np.nan
-
-                if np.isnan(radius):  # if there is a degenerate case, we stop
-                    the_simplex = candidate
-                    foundIt = True
-                    break
-
-                if not inside_sphere(np.delete(X0, anti_ranks[candidate, ], 0), center, radius):
-                    the_simplex = candidate
-                    foundIt = True
-                    break
-        if foundIt:
+        if simplex is not None:
             break
+        k_nearest_neighbors = X0[anti_ranks[:k], ]
+        if in_hull(X1, k_nearest_neighbors):
+            # 3. For all the subsets of cardinality p+1 that have x in their
+            # convex hull... (since previous simplices did not contain X1, we
+            # need only to consider the simplices that have the new nearest
+            # neighbors as a vertex) ...check if a point in X0 is contained in
+            # the circumscribing hypersphere of any of these simplices
+            for subset in itertools.combinations(range(k - 1), p):
+                candidate = subset + (k - 1, )
+                hypersphere = Hypersphere(k_nearest_neighbors[candidate, ])
+                if in_hull(X1, hypersphere.nodes):
+                    irrelevant_nodes = np.delete(X0, anti_ranks[candidate, ], axis=0)
+                    if not hypersphere.contains(irrelevant_nodes):
+                        simplex = candidate
 
-    anti_ranks_tilde = sorted(anti_ranks[the_simplex, ])
-    return X0[anti_ranks_tilde, ], anti_ranks_tilde
+    if simplex is None:
+        simplex = tuple(range(k))
+    anti_ranks_tilde = sorted(anti_ranks[simplex, ])
+    result = (X0[anti_ranks_tilde, ], anti_ranks_tilde)
+    return result
 
 
 def pensynth_weights(X0, X1, pen=0.0, V=None):
@@ -205,7 +205,7 @@ def pensynth_weights(X0, X1, pen=0.0, V=None):
     solvers.options['reltol'] = 1e-8
     solvers.options['maxiters'] = 500
     sol = solvers.qp(P, q, G, h, A, b)
-    return Tzero(np.squeeze(np.array(sol['x'])))
+    return set_zero_weights(np.squeeze(np.array(sol['x'])))
 
 
 if __name__ == '__main__':

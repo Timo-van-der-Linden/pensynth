@@ -1,0 +1,15 @@
+ATT: 2170.629
+age: 27.367
+education: 10.335
+married: 0.201
+black: 0.812
+hispanic: 0.051
+re74: 2256.647
+re75: 1619.596
+nodegree: 0.662
+NoIncome74: 0.677
+NoIncome75: 0.632
+Min sparsity: 1
+Median sparsity: 6
+Max sparsity: 11
+0 treated units have sparsity larger than p+1.
